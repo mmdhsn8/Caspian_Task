@@ -168,6 +168,10 @@ const NUMERIC_FIELD_INDICES = [
   IDX.CONDO_FEES,
 ];
 
+const RECENT_NEW_ROW_HIGHLIGHT_MINUTES = 10;
+const RECENT_NEW_ROW_HIGHLIGHT_FILL = "#E5E7EB";
+const SHEET_TIMESTAMP_DISPLAY_FORMAT = "yyyy-MM-dd HH:mm";
+
 /**
  * Main Web App entry point.
  */
@@ -579,8 +583,9 @@ function synchronizeRows(
       return;
     }
 
-    const originalFirstSeen =
-      normalizeText(existing.row[IDX.FIRST_SEEN]) || checkedAt;
+    const originalFirstSeen = isBlankCell(existing.row[IDX.FIRST_SEEN])
+      ? checkedAt
+      : existing.row[IDX.FIRST_SEEN];
 
     // Preserve existing Telegram metadata
     var telStatus = normalizeText(existing.row[IDX.TELEGRAM_STATUS]);
@@ -659,9 +664,9 @@ function buildFullRow(incoming, fields) {
     row[index] = toSheetValue(incoming[index]);
   }
 
-  row[IDX.FIRST_SEEN] = fields.firstSeen || "";
-  row[IDX.LAST_SEEN] = fields.lastSeen || "";
-  row[IDX.LAST_CHECKED] = fields.lastChecked || "";
+  row[IDX.FIRST_SEEN] = toSheetTimestampValue(fields.firstSeen);
+  row[IDX.LAST_SEEN] = toSheetTimestampValue(fields.lastSeen);
+  row[IDX.LAST_CHECKED] = toSheetTimestampValue(fields.lastChecked);
   row[IDX.STATUS] = fields.status;
 
   row[IDX.TELEGRAM_STATUS] = fields.telegramStatus || "";
@@ -764,6 +769,41 @@ function normalizeText(value) {
   return normalized ? normalized : null;
 }
 
+function isBlankCell(value) {
+  return value === null || value === undefined || normalizeText(value) === null;
+}
+
+function parseIsoTimestampText(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim();
+  if (
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(
+      normalized,
+    )
+  ) {
+    return null;
+  }
+
+  const parsed = new Date(normalized);
+  return isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function toSheetTimestampValue(value) {
+  if (value instanceof Date) {
+    return isNaN(value.getTime()) ? "" : value;
+  }
+
+  if (value === null || value === undefined || value === "") {
+    return "";
+  }
+
+  const parsed = parseIsoTimestampText(value);
+  return parsed || value;
+}
+
 /**
  * Converts null or undefined to an empty Google Sheets cell.
  */
@@ -805,10 +845,17 @@ function writeRows(sheet, rows) {
 function formatSheet(sheet) {
   sheet.autoResizeColumns(1, FULL_COLS);
   sheet.setFrozenRows(1);
+  applyRecentNewRowHighlightRule(sheet);
 
   const lastRow = sheet.getLastRow();
+  const firstSeenColumn = findHeaderColumn(sheet, "First Seen");
+  const lastSeenColumn = findHeaderColumn(sheet, "Last Seen");
+  const lastCheckedColumn = findHeaderColumn(sheet, "Last Checked");
+  const scrapedAtColumn = findHeaderColumn(sheet, "Scraped At");
 
   if (lastRow > 1) {
+    migrateIsoTextTimestamps(sheet, [firstSeenColumn, lastSeenColumn, lastCheckedColumn]);
+
     sheet
       .getRange(2, IDX.PRICE + 1, lastRow - 1, 7)
       .setNumberFormat("#,##0");
@@ -818,9 +865,152 @@ function formatSheet(sheet) {
       .setNumberFormat("0.000000");
 
     sheet
-      .getRange(2, IDX.SCRAPED_AT + 1, lastRow - 1, 4)
+      .getRange(2, firstSeenColumn, lastRow - 1, 1)
+      .setNumberFormat(SHEET_TIMESTAMP_DISPLAY_FORMAT);
+
+    sheet
+      .getRange(2, lastSeenColumn, lastRow - 1, 1)
+      .setNumberFormat(SHEET_TIMESTAMP_DISPLAY_FORMAT);
+
+    sheet
+      .getRange(2, lastCheckedColumn, lastRow - 1, 1)
+      .setNumberFormat(SHEET_TIMESTAMP_DISPLAY_FORMAT);
+
+    sheet
+      .getRange(2, scrapedAtColumn, lastRow - 1, 1)
       .setNumberFormat("@");
   }
+}
+
+/**
+ * Backfills historical ISO text cells into real Date values once so
+ * Sheets can display them using its own timezone-aware number format.
+ */
+function migrateIsoTextTimestamps(sheet, columns) {
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow <= 1) {
+    return;
+  }
+
+  columns.forEach(function (column) {
+    const range = sheet.getRange(2, column, lastRow - 1, 1);
+    const values = range.getValues();
+    let changed = false;
+
+    const updated = values.map(function (row) {
+      const current = row[0];
+      const parsed = parseIsoTimestampText(current);
+
+      if (parsed) {
+        changed = true;
+        return [parsed];
+      }
+
+      return [current];
+    });
+
+    if (changed) {
+      range.setValues(updated);
+    }
+  });
+}
+
+/**
+ * Highlights newly inserted rows for a short window after First Seen.
+ * The rule is formula-driven so it clears itself automatically.
+ */
+function applyRecentNewRowHighlightRule(sheet) {
+  const spreadsheet = sheet.getParent();
+  spreadsheet.setRecalculationInterval(
+    SpreadsheetApp.RecalculationInterval.ON_CHANGE_AND_EVERY_MINUTE,
+  );
+
+  const lastColumn = sheet.getLastColumn();
+  const firstSeenColumn = findHeaderColumn(sheet, "First Seen");
+  const statusColumn = findHeaderColumn(sheet, "Status");
+  const formula = buildRecentNewRowHighlightFormula(firstSeenColumn, statusColumn);
+  const dataRange = sheet.getRange(2, 1, Math.max(sheet.getMaxRows() - 1, 1), lastColumn);
+  const rule = SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied(formula)
+    .setBackground(RECENT_NEW_ROW_HIGHLIGHT_FILL)
+    .setRanges([dataRange])
+    .build();
+
+  const existingRules = sheet.getConditionalFormatRules();
+  let replaced = false;
+  const updatedRules = existingRules.map(function (existingRule) {
+    if (isRecentNewRowHighlightRule(existingRule, formula)) {
+      replaced = true;
+      return rule;
+    }
+    return existingRule;
+  });
+
+  if (!replaced) {
+    updatedRules.push(rule);
+  }
+
+  sheet.setConditionalFormatRules(updatedRules);
+}
+
+function findHeaderColumn(sheet, headerName) {
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+
+  for (var index = 0; index < headers.length; index++) {
+    if (normalizeText(headers[index]) === headerName) {
+      return index + 1;
+    }
+  }
+
+  throw new Error('Missing required header "' + headerName + '"');
+}
+
+function buildRecentNewRowHighlightFormula(firstSeenColumn, statusColumn) {
+  const firstSeenLetter = columnToLetter(firstSeenColumn);
+  const statusLetter = columnToLetter(statusColumn);
+
+  return (
+    '=AND($' +
+    statusLetter +
+    '2="NEW",$' +
+    firstSeenLetter +
+    '2<>"",NOW()>=$' +
+    firstSeenLetter +
+    '2,NOW()-$' +
+    firstSeenLetter +
+    '2<=TIME(0,' +
+    RECENT_NEW_ROW_HIGHLIGHT_MINUTES +
+    ',0))'
+  );
+}
+
+function isRecentNewRowHighlightRule(rule, formula) {
+  const condition = rule.getBooleanCondition();
+
+  if (!condition) {
+    return false;
+  }
+
+  if (condition.getCriteriaType() !== SpreadsheetApp.BooleanCriteria.CUSTOM_FORMULA) {
+    return false;
+  }
+
+  const values = condition.getCriteriaValues();
+  return values && values[0] === formula;
+}
+
+function columnToLetter(column) {
+  let result = "";
+  let current = column;
+
+  while (current > 0) {
+    const remainder = (current - 1) % 26;
+    result = String.fromCharCode(65 + remainder) + result;
+    current = Math.floor((current - 1) / 26);
+  }
+
+  return result;
 }
 
 function getDuplicateIds(rows) {

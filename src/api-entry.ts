@@ -6,6 +6,7 @@ async function startApi(): Promise<void> {
     envModule,
     alertModule,
     lockModule,
+    sheetsModule,
     loggerModule,
     healthModule,
     apiModule,
@@ -14,6 +15,7 @@ async function startApi(): Promise<void> {
     import("./config/env.js"),
     import("./services/failure-alert.js"),
     import("./services/run-lock.js"),
+    import("./services/sheets.js"),
     import("./utils/logger.js"),
     import("./health/health-store.js"),
     import("./api-server.js"),
@@ -23,6 +25,7 @@ async function startApi(): Promise<void> {
   const { env } = envModule;
   const { sendConfiguredFailureAlert } = alertModule;
   const { acquireRunLock, describeRunLockOwner } = lockModule;
+  const { acknowledgeTelegramResults } = sheetsModule;
   const { createLogger } = loggerModule;
   const { HealthStore } = healthModule;
   const { startApiServer } = apiModule;
@@ -44,6 +47,7 @@ async function startApi(): Promise<void> {
     describeRunLockOwner,
     runOnce,
     sendConfiguredFailureAlert,
+    acknowledgeTelegramResults,
     createLogger,
     HealthStore,
     env: {

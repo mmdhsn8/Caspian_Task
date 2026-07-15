@@ -28,7 +28,7 @@
     "format": "prettier --write \"src/**/*.ts\"",
     "playwright:install": "playwright install chromium",
     "debug:detail": "tsx scripts/save-detail-html.ts",
-    "test": "tsx tests/parser-listing-bug.test.ts && tsx tests/telegram-format.test.ts && tsx tests/telegram-service.test.ts && tsx tests/notification-outbox.test.ts && tsx tests/helpers.test.ts && tsx tests/logger.test.ts && tsx tests/run-lock.test.ts && tsx tests/failure-alert.test.ts && tsx tests/scheduler.test.ts && tsx tests/run-once.test.ts && tsx tests/metrics-store.test.ts && tsx tests/health-store.test.ts && tsx tests/resilience-cache.test.ts && tsx tests/service-retry-metrics.test.ts && tsx tests/rate-limiter-audit.test.ts && tsx tests/run-observability.test.ts && tsx tests/config-doctor.test.ts"
+    "test": "tsx tests/parser-listing-bug.test.ts && tsx tests/telegram-format.test.ts && tsx tests/telegram-service.test.ts && tsx tests/notification-outbox.test.ts && tsx tests/helpers.test.ts && tsx tests/logger.test.ts && tsx tests/run-lock.test.ts && tsx tests/failure-alert.test.ts && tsx tests/scheduler.test.ts && tsx tests/run-once.test.ts && tsx tests/api-server.test.ts && tsx tests/metrics-store.test.ts && tsx tests/health-store.test.ts && tsx tests/resilience-cache.test.ts && tsx tests/service-retry-metrics.test.ts && tsx tests/rate-limiter-audit.test.ts && tsx tests/run-observability.test.ts && tsx tests/config-doctor.test.ts"
   },
   "dependencies": {
     "cheerio": "^1.2.0",

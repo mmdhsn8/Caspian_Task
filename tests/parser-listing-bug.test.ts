@@ -1,6 +1,7 @@
 import * as cheerio from "cheerio";
 import { searchSelectors } from "../src/scraper/selectors.js";
 import { extractNumericId } from "../src/utils/helpers.js";
+import { parseListingDetail } from "../src/parser/detail.js";
 import { parseSearchResults } from "../src/parser/listing.js";
 
 let passed = 0;
@@ -155,6 +156,55 @@ function assert(condition: boolean, msg: string): void {
     "Test 8b: listingId from root data-listing-id. Got: " +
       (results[0]?.listingId ?? "undefined"),
   );
+}
+
+// ── Test 9: detail parser extracts rooms/bedrooms/bathrooms/living area ─────
+{
+  const html = `
+    <body>
+      <span id="ListingId">17042189</span>
+      <div class="piece">7 rooms</div>
+      <div class="cac">3 bedrooms</div>
+      <div class="sdb">1 bathroom and 1 powder room</div>
+      <div class="carac-container">
+        <div class="carac-title">Living area</div>
+        <div class="carac-value"><span>946 sqft</span></div>
+      </div>
+    </body>`;
+  const detail = parseListingDetail(html, "https://www.centris.ca/en/test/17042189");
+  assert(detail.rooms === 7, "Test 9a: rooms extracted from detail page");
+  assert(detail.bedrooms === 3, "Test 9b: bedrooms extracted from detail page");
+  assert(detail.bathrooms === 1, "Test 9c: bathrooms extracted from detail page");
+  assert(detail.livingArea === 946, "Test 9d: living area extracted from carac label");
+}
+
+// ── Test 10: detail parser falls back to characteristic labels for all 4 ────
+{
+  const html = `
+    <body>
+      <span id="ListingId">17042190</span>
+      <div class="carac-container">
+        <div class="carac-title">Rooms</div>
+        <div class="carac-value"><span>8</span></div>
+      </div>
+      <div class="carac-container">
+        <div class="carac-title">Bedrooms</div>
+        <div class="carac-value"><span>4</span></div>
+      </div>
+      <div class="carac-container">
+        <div class="carac-title">Bathrooms</div>
+        <div class="carac-value"><span>2</span></div>
+      </div>
+      <div class="carac-container">
+        <div class="carac-title">Net area</div>
+        <div class="carac-value"><span>1,120 sqft</span></div>
+      </div>
+    </body>`;
+  const detail = parseListingDetail(html, "https://www.centris.ca/en/test/17042190");
+  assert(detail.rooms === 8, "Test 10a: rooms fallback uses carac title");
+  assert(detail.bedrooms === 4, "Test 10b: bedrooms fallback uses carac title");
+  assert(detail.bathrooms === 2, "Test 10c: bathrooms fallback uses carac title");
+  assert(detail.livingArea === 1120, "Test 10d: living area fallback uses carac title");
 }
 
 // ── Summary ─────────────────────────────────────────────────────────────────

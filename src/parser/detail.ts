@@ -123,7 +123,9 @@ function extractAgencyName($: cheerio.CheerioAPI): string | null {
 
 function extractRooms($: cheerio.CheerioAPI): number | null {
   const text = firstText($, $("body"), detailSelectors.rooms);
-  return text ? normalizeInteger(text) : null;
+  if (text) return normalizeInteger(text);
+  const carac = findCaracValueByLabels($, ["Rooms", "Pièces"]);
+  return carac ? normalizeInteger(carac) : null;
 }
 
 function findCaracValue($: cheerio.CheerioAPI, label: string): string | null {
@@ -138,10 +140,26 @@ function findCaracValue($: cheerio.CheerioAPI, label: string): string | null {
   return null;
 }
 
+function findCaracValueByLabels(
+  $: cheerio.CheerioAPI,
+  labels: readonly string[],
+): string | null {
+  for (const label of labels) {
+    const value = findCaracValue($, label);
+    if (value) return value;
+  }
+  return null;
+}
+
 function extractLivingArea($: cheerio.CheerioAPI): number | null {
   const text = firstText($, $("body"), detailSelectors.livingArea);
   if (text) return normalizeArea(text);
-  const carac = findCaracValue($, "Net area");
+  const carac = findCaracValueByLabels($, [
+    "Net area",
+    "Living area",
+    "Superficie habitable",
+    "Superficie nette",
+  ]);
   return carac ? normalizeArea(carac) : null;
 }
 
@@ -242,12 +260,16 @@ function normalizePropertyType(raw: string): string {
 
 function extractBedrooms($: cheerio.CheerioAPI): number | null {
   const text = firstText($, $("body"), detailSelectors.bedrooms);
-  return text ? normalizeInteger(text) : null;
+  if (text) return normalizeInteger(text);
+  const carac = findCaracValueByLabels($, ["Bedrooms", "Chambres"]);
+  return carac ? normalizeInteger(carac) : null;
 }
 
 function extractBathrooms($: cheerio.CheerioAPI): number | null {
   const text = firstText($, $("body"), detailSelectors.bathrooms);
-  return text ? normalizeInteger(text) : null;
+  if (text) return normalizeInteger(text);
+  const carac = findCaracValueByLabels($, ["Bathrooms", "Salles de bains"]);
+  return carac ? normalizeInteger(carac) : null;
 }
 
 function findFinancialSection($: cheerio.CheerioAPI): cheerio.Cheerio<AnyNode> | null {

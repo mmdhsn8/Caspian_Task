@@ -24,7 +24,10 @@ function assert(condition: boolean, message: string): void {
   }
 }
 
-function makeListing(listingId: string): ListingDetail {
+function makeListing(
+  listingId: string,
+  overrides: Partial<ListingDetail> = {},
+): ListingDetail {
   return {
     listingId,
     url: "https://www.centris.ca/en/properties~" + listingId,
@@ -39,8 +42,8 @@ function makeListing(listingId: string): ListingDetail {
     brokerPhone: null,
     brokerProfileUrl: null,
     agencyName: null,
-    rooms: null,
-    livingArea: null,
+    rooms: 7,
+    livingArea: 946,
     yearBuilt: null,
     parking: null,
     latitude: null,
@@ -52,6 +55,7 @@ function makeListing(listingId: string): ListingDetail {
     schoolTax: null,
     condoFees: null,
     scrapedAt: "2026-07-14T00:00:00.000Z",
+    ...overrides,
   };
 }
 
@@ -98,11 +102,15 @@ const { notifyNewListings } = await import("../src/services/telegram.js");
 try {
   let sheetCall = 0;
   const sheetRetryDelays: number[] = [];
+  let sheetRequestBodies: Record<string, unknown>[] = [];
   let sheetMetrics:
     | { attempts: number; retries: number; totalDelayMs: number }
     | null = null;
-  mockFetch(() => {
+  mockFetch((_url, init) => {
     sheetCall++;
+    if (typeof init?.body === "string") {
+      sheetRequestBodies.push(JSON.parse(init.body) as Record<string, unknown>);
+    }
     if (sheetCall < 3) {
       return response(500, { ok: false, description: "temporary outage" });
     }
@@ -133,6 +141,54 @@ try {
   assert(sheetMetrics?.retries === 2, "sheet retry metrics count retries");
   assert(sheetMetrics?.attempts === 3, "sheet retry metrics count attempts");
   assert(sheetMetrics?.totalDelayMs === 300, "sheet retry metrics count delay");
+  const firstRequest = sheetRequestBodies[0];
+  const firstRow = Array.isArray(firstRequest?.rows)
+    ? (firstRequest.rows[0] as unknown[])
+    : null;
+  assert(Array.isArray(firstRow), "sheet payload includes rows array");
+  assert(firstRow?.[4] === 7, "sheet payload maps rooms to column 5");
+  assert(firstRow?.[5] === 4, "sheet payload maps bedrooms to column 6");
+  assert(firstRow?.[6] === 2, "sheet payload maps bathrooms to column 7");
+  assert(firstRow?.[7] === 946, "sheet payload maps living area to column 8");
+  assert(firstRow?.[8] === "N/A", "missing year built becomes N/A");
+  assert(firstRow?.[9] === "N/A", "missing parking becomes N/A");
+  assert(firstRow?.[13] === "N/A", "missing land assessment becomes N/A");
+  assert(firstRow?.[20] === "N/A", "missing broker name becomes N/A");
+  assert(firstRow?.[24] === "2026-07-14T00:00:00.000Z", "timestamps stay unchanged");
+
+  mockFetch((_url, init) => {
+    if (typeof init?.body === "string") {
+      sheetRequestBodies.push(JSON.parse(init.body) as Record<string, unknown>);
+    }
+    return response(200, {
+      success: true,
+      received: 1,
+      newCount: 0,
+      updatedCount: 0,
+      unchangedCount: 1,
+      totalStored: 1,
+      newListingIds: [],
+      updatedListingIds: [],
+      pendingTelegramListingIds: [],
+      checkedAt: "2026-07-15T00:00:00.000Z",
+    });
+  });
+  await syncDetailsToSheet([
+    makeListing("zero", {
+      municipalTax: 0,
+      schoolTax: 0,
+      condoFees: 0,
+      rooms: 0,
+    }),
+  ]);
+  const secondRequest = sheetRequestBodies[sheetRequestBodies.length - 1];
+  const secondRow = Array.isArray(secondRequest?.rows)
+    ? (secondRequest.rows[0] as unknown[])
+    : null;
+  assert(secondRow?.[4] === 0, "numeric zero rooms stays 0");
+  assert(secondRow?.[16] === 0, "numeric zero municipal tax stays 0");
+  assert(secondRow?.[17] === 0, "numeric zero school tax stays 0");
+  assert(secondRow?.[18] === 0, "numeric zero condo fees stays 0");
 
   let telegramCall = 0;
   const telegramRetryDelays: number[] = [];

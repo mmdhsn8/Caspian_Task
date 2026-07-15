@@ -15,6 +15,10 @@ export interface ApiServerConfig {
   readonly sendConfiguredFailureAlert: (
     params: import("./services/failure-alert.js").FailureAlertInput,
   ) => Promise<import("./services/failure-alert.js").FailureAlertResult>;
+  readonly acknowledgeTelegramResults: (
+    results: readonly import("./services/sheets.js").TelegramAckItem[],
+    options?: import("./services/sheets.js").TelegramAckOptions,
+  ) => Promise<void>;
   readonly createLogger: (
     name: string,
     runId?: string,
@@ -41,6 +45,39 @@ function jsonResponse(
   res.end(JSON.stringify(body) + "\n");
 }
 
+function isAuthorized(req: http.IncomingMessage, workflowApiKey: string): boolean {
+  const workflowKey = req.headers["x-workflow-key"];
+  return typeof workflowKey === "string" && workflowKey === workflowApiKey;
+}
+
+async function readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+  req.setEncoding("utf8");
+  let raw = "";
+  for await (const chunk of req) {
+    if (typeof chunk !== "string") {
+      throw new Error("Request body must be UTF-8 JSON");
+    }
+    raw += chunk;
+  }
+  raw = raw.trim();
+  if (raw.length === 0) {
+    throw new Error("Request body must be a JSON object");
+  }
+  const parsed: unknown = JSON.parse(raw);
+  if (typeof parsed !== "object" || parsed == null || Array.isArray(parsed)) {
+    throw new Error("Request body must be a JSON object");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function parseListingId(body: Record<string, unknown>): string {
+  const listingId = body.listingId;
+  if (typeof listingId !== "string" || listingId.trim().length === 0) {
+    throw new Error("listingId must be a non-empty string");
+  }
+  return listingId.trim();
+}
+
 export async function startApiServer(config: ApiServerConfig): Promise<http.Server> {
   const log = config.createLogger("centris-api");
   const { createServer } = await import("node:http");
@@ -51,6 +88,11 @@ export async function startApiServer(config: ApiServerConfig): Promise<http.Serv
 
     if (method === "POST" && parsedUrl.pathname === "/api/v1/runs/sentris") {
       void handleRunRequest(req, res, config, log);
+      return;
+    }
+
+    if (method === "POST" && parsedUrl.pathname === "/api/v1/notifications/ack") {
+      void handleAckRequest(req, res, config, log);
       return;
     }
 
@@ -72,9 +114,7 @@ async function handleRunRequest(
   config: ApiServerConfig,
   log: ReturnType<typeof import("./utils/logger.js").createLogger>,
 ): Promise<void> {
-  const workflowKey = req.headers["x-workflow-key"];
-
-  if (typeof workflowKey !== "string" || workflowKey !== config.workflowApiKey) {
+  if (!isAuthorized(req, config.workflowApiKey)) {
     jsonResponse(res, 401, { error: "Unauthorized" });
     return;
   }
@@ -167,5 +207,53 @@ async function handleRunRequest(
       }
     }
     await health.setLock(false, null, null);
+  }
+}
+
+async function handleAckRequest(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  config: ApiServerConfig,
+  log: ReturnType<typeof import("./utils/logger.js").createLogger>,
+): Promise<void> {
+  if (!isAuthorized(req, config.workflowApiKey)) {
+    jsonResponse(res, 401, { error: "Unauthorized" });
+    return;
+  }
+
+  let listingId: string;
+  try {
+    const body = await readJsonBody(req);
+    listingId = parseListingId(body);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Invalid request body";
+    jsonResponse(res, 400, { error: message });
+    return;
+  }
+
+  try {
+    await config.acknowledgeTelegramResults(
+      [
+        {
+          listingId,
+          success: true,
+          messageId: null,
+          attempts: 1,
+          error: null,
+          sentAt: new Date().toISOString(),
+        },
+      ],
+      { throwOnError: true },
+    );
+
+    jsonResponse(res, 200, {
+      success: true,
+      listingId,
+      status: "acknowledged",
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log.warn("Acknowledgement API failed for listing " + listingId + ": " + message);
+    jsonResponse(res, 500, { error: "Acknowledgement failed", listingId });
   }
 }

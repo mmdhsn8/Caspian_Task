@@ -130,6 +130,7 @@ Recommended node flow:
 3. `If` with `newCount > 0`
 4. `Split Out` on `newListings`
 5. `Telegram`
+6. `HTTP Request` to acknowledge delivery
 
 Suggested HTTP Request configuration:
 - Method: `POST`
@@ -137,6 +138,12 @@ Suggested HTTP Request configuration:
 - Header: `x-workflow-key: <your WORKFLOW_API_KEY>`
 - Body: none
 - Timeout: `900000` ms (15 minutes). The scraper may take several minutes when crawling many search pages.
+
+Suggested acknowledgement request after Telegram success:
+- Method: `POST`
+- URL: `http://127.0.0.1:8787/api/v1/notifications/ack`
+- Header: `x-workflow-key: <your WORKFLOW_API_KEY>`
+- JSON body: `{ "listingId": "{{$json.listingId}}" }`
 
 Notification ownership:
 | Mode | Used by | Behavior |
@@ -148,6 +155,7 @@ Practical pattern:
 - Filter on `{{$json.newCount > 0}}`
 - Split `newListings` into individual items
 - Build the Telegram message from fields such as `price`, `address`, `type`, `parking`, `municipalTax`, `schoolTax`, `brokerName`, and `propertyUrl`
+- Call the acknowledgement endpoint only after the Telegram node succeeds so the Sheet can move that listing from `PENDING` to `SENT`
 
 ## API Reference
 ### `POST /api/v1/runs/sentris`
@@ -198,6 +206,27 @@ Error responses:
 | `401` | Missing or invalid `x-workflow-key` | `{ "error": "Unauthorized" }` |
 | `409` | Run lock is already held | `{ "error": "Another run is currently active", "owner": "..." }` |
 | `500` | Scrape failed after startup | `{ "error": "...", "runId": "...", "stage": "...", "durationMs": 12345 }` |
+
+### `POST /api/v1/notifications/ack`
+- Binds to `127.0.0.1:<API_PORT>`
+- Requires the same `x-workflow-key` header
+- Reuses the existing Sheets acknowledgement path used by direct Telegram mode
+
+Request body:
+```json
+{
+  "listingId": "12345678"
+}
+```
+
+Success response:
+```json
+{
+  "success": true,
+  "listingId": "12345678",
+  "status": "acknowledged"
+}
+```
 
 ## Reliability Features
 - Cross-process filesystem run lock with stale and corrupt lock recovery

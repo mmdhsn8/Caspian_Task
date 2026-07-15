@@ -6,6 +6,30 @@ import {
   detailToRow,
 } from "../models/listing.js";
 
+const OPTIONAL_SHEET_FIELD_INDICES = new Set<number>([
+  4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+]);
+
+function toOptionalSheetFallback(
+  value: string | number | null | undefined,
+): string | number {
+  if (value == null) return "N/A";
+  if (typeof value === "string") {
+    return value.trim().length === 0 ? "N/A" : value;
+  }
+  return value;
+}
+
+function applySheetPresentationFallbacks(
+  row: readonly (string | number | null)[],
+): (string | number)[] {
+  return row.map((value, index) =>
+    OPTIONAL_SHEET_FIELD_INDICES.has(index)
+      ? toOptionalSheetFallback(value)
+      : (value ?? ""),
+  );
+}
+
 export interface SheetSyncResult {
   success: true;
   received: number;
@@ -44,6 +68,10 @@ export interface AppsScriptRequestMetrics {
 export interface AppsScriptRequestOptions {
   readonly onRetry?: (info: AppsScriptRetryInfo) => void | Promise<void>;
   readonly onComplete?: (metrics: AppsScriptRequestMetrics) => void | Promise<void>;
+}
+
+export interface TelegramAckOptions extends AppsScriptRequestOptions {
+  readonly throwOnError?: boolean;
 }
 
 function sanitize(detail: ListingDetail): ListingDetail {
@@ -134,7 +162,7 @@ export async function syncDetailsToSheet(
 
   const rows = details.map((d) => {
     const sanitized = sanitize(d);
-    const row = detailToRow(sanitized);
+    const row = applySheetPresentationFallbacks(detailToRow(sanitized));
     if (row.length !== SCRAPER_ROW_LENGTH) {
       throw new Error(
         `Row has ${String(row.length)} columns but expected ${String(SCRAPER_ROW_LENGTH)}. ` +
@@ -160,7 +188,7 @@ export async function syncDetailsToSheet(
 
 export async function acknowledgeTelegramResults(
   results: readonly TelegramAckItem[],
-  options: AppsScriptRequestOptions = {},
+  options: TelegramAckOptions = {},
 ): Promise<void> {
   if (results.length === 0) return;
 
@@ -207,5 +235,6 @@ export async function acknowledgeTelegramResults(
     console.warn(
       "[sheets] Delivery state not saved — listings may be resent next run (at-least-once delivery)",
     );
+    if (options.throwOnError) throw err;
   }
 }
