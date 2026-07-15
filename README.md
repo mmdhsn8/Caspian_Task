@@ -25,7 +25,7 @@ flowchart LR
 ```
 
 ## Requirements
-- Node.js `18.18+`
+- Node.js `20.19–24.x`
 - Browser: Google Chrome (`BROWSER_CHANNEL=chrome`, default), Microsoft Edge (`BROWSER_CHANNEL=msedge`), or Playwright Chromium after `npm run playwright:install`
 - Optional Google Apps Script web app for Sheets sync
 - Optional Telegram bot and chat/channel for direct notification mode
@@ -34,7 +34,7 @@ flowchart LR
 ## Quick Start
 ```bash
 npm install
-cp .env.example .env
+Copy-Item .env.example .env
 ```
 
 Required configuration before the first real run:
@@ -136,7 +136,7 @@ Suggested HTTP Request configuration:
 - URL: `http://127.0.0.1:8787/api/v1/runs/sentris`
 - Header: `x-workflow-key: <your WORKFLOW_API_KEY>`
 - Body: none
-- Timeout: start with `180000` ms and increase if your search scope is large
+- Timeout: `900000` ms (15 minutes). The scraper may take several minutes when crawling many search pages.
 
 Notification ownership:
 | Mode | Used by | Behavior |
@@ -226,7 +226,7 @@ This repository is single-host oriented. Cache, metrics, health, and lock state 
 
 ## Demo Flow
 For a 4 to 5 minute hiring demo:
-1. Open `.env` and point out `CENTRIS_SEARCH_URL`, browser choice, Sheets config, and `WORKFLOW_API_KEY`
+1. Show `.env.example` or the Config Doctor output; never display real tokens, API keys, proxy credentials, or secrets in the video
 2. Start the API with `npm run api`
 3. Show the n8n workflow: `Schedule Trigger -> HTTP Request -> If -> Split Out -> Telegram`
 4. Trigger one run and show the API response with `newCount` and `newListings`
@@ -248,7 +248,5 @@ For a more stable setup:
 - Respect Centris terms, access policies, and applicable law
 - Keep request volume conservative; raise rate limits only when you understand the impact
 - This is not a distributed scraper platform; the lock, cache, metrics, and health files are local only
-- Google Sheets is the business source of truth for deduplication and notification outbox state
+- Google Sheets is the business source of truth for listing state and deduplication.
 - Use the project only for authorized monitoring and messaging workflows
-
-License: MIT
