@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+coverage/
+.vscode/
+*.log
+.runtime/
+logs/
+debug/
+.DS_Store
