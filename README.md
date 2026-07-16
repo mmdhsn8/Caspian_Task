@@ -1,6 +1,10 @@
 # Centris Scraper
 Production-oriented TypeScript scraper for Centris real estate listings. It crawls Centris search results and detail pages, syncs listing state to Google Sheets, and can notify either Telegram directly or an external workflow such as n8n. The project is designed for a single host with filesystem-backed state, retries, health reporting, and cross-process run locking.
 
+## Demo Video
+
+[Watch the 4-minute workflow demonstration](https://drive.google.com/file/d/1_ljMjGut_FH6tFUa_DzRlltaZtxEsi7m/view?usp=drive_link)
+
 ## Key Capabilities
 - Search-page crawl with global deduplication by `listingId`
 - Detail-page scraping for price, address, taxes, parking, broker, assessments, and more
