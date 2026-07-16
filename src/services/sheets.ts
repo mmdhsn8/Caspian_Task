@@ -1,5 +1,9 @@
 import { env } from "../config/env.js";
-import { executeWithRetry, isRetryableNetworkError } from "../resilience/retry-policy.js";
+import {
+  executeWithRetry,
+  isRetryableNetworkError,
+  type RetryResult,
+} from "../resilience/retry-policy.js";
 import {
   type ListingDetail,
   SCRAPER_ROW_LENGTH,
@@ -46,7 +50,7 @@ export interface SheetSyncResult {
 export interface TelegramAckItem {
   listingId: string;
   success: boolean;
-  messageId: number | null;
+  messageId: string | number | null;
   attempts: number;
   error: string | null;
   sentAt: string | null;
@@ -72,6 +76,52 @@ export interface AppsScriptRequestOptions {
 
 export interface TelegramAckOptions extends AppsScriptRequestOptions {
   readonly throwOnError?: boolean;
+}
+
+export interface TelegramAckResult {
+  readonly updatedCount: number;
+  readonly notFoundCount: number;
+}
+
+interface AppsScriptResponse extends Record<string, unknown> {
+  readonly success: boolean;
+  readonly error?: unknown;
+  readonly code?: unknown;
+}
+
+class AppsScriptAcknowledgementError extends Error {
+  readonly code: string | null;
+  readonly retryable: boolean;
+
+  constructor(message: string, code: string | null, retryable: boolean) {
+    super(message);
+    this.name = "AppsScriptAcknowledgementError";
+    this.code = code;
+    this.retryable = retryable;
+  }
+}
+
+function formatAppsScriptFailure(data: AppsScriptResponse): {
+  readonly code: string | null;
+  readonly message: string;
+} {
+  const code =
+    typeof data.code === "string" && data.code.trim().length > 0 ? data.code : null;
+  const reason =
+    typeof data.error === "string" && data.error.trim().length > 0
+      ? data.error.trim()
+      : "Apps Script returned success=false";
+  return {
+    code,
+    message: code ? code + ": " + reason : reason,
+  };
+}
+
+function isRetryableAckFailure(error: unknown): boolean {
+  if (error instanceof AppsScriptAcknowledgementError) {
+    return error.retryable;
+  }
+  return isRetryableNetworkError(error);
 }
 
 function sanitize(detail: ListingDetail): ListingDetail {
@@ -102,6 +152,19 @@ async function postToAppsScript(
   body: Record<string, unknown>,
   options: AppsScriptRequestOptions = {},
 ): Promise<Record<string, unknown>> {
+  const result = await postToAppsScriptRaw(body, options);
+  const data = result.value;
+  if (!data.success) {
+    const failure = formatAppsScriptFailure(data);
+    throw new Error(failure.message);
+  }
+  return data;
+}
+
+async function postToAppsScriptRaw(
+  body: Record<string, unknown>,
+  options: AppsScriptRequestOptions = {},
+): Promise<RetryResult<AppsScriptResponse>> {
   const url = buildAppsScriptUrl();
 
   const result = await executeWithRetry(
@@ -125,9 +188,7 @@ async function postToAppsScript(
       ) {
         throw new Error("Apps Script returned an unexpected response");
       }
-      const data = result as Record<string, unknown>;
-      if (!data.success) throw new Error("Apps Script returned success=false");
-      return data;
+      return result as AppsScriptResponse;
     },
     {
       maxAttempts: env.sheetRetryMaxAttempts,
@@ -147,7 +208,7 @@ async function postToAppsScript(
     retries: result.retries,
     totalDelayMs: result.totalDelayMs,
   });
-  return result.value;
+  return result;
 }
 
 export async function syncDetailsToSheet(
@@ -189,29 +250,56 @@ export async function syncDetailsToSheet(
 export async function acknowledgeTelegramResults(
   results: readonly TelegramAckItem[],
   options: TelegramAckOptions = {},
-): Promise<void> {
-  if (results.length === 0) return;
+): Promise<TelegramAckResult> {
+  if (results.length === 0) {
+    return { updatedCount: 0, notFoundCount: 0 };
+  }
 
   if (!env.googleAppsScriptUrl) {
     console.warn("[sheets] Cannot acknowledge Telegram: Apps Script not configured.");
-    return;
+    return { updatedCount: 0, notFoundCount: results.length };
   }
 
   try {
-    const data = await postToAppsScript(
-      {
-        action: "ackTelegram",
-        results: results.map((r) => ({
-          listingId: r.listingId,
-          success: r.success,
-          messageId: r.messageId,
-          attempts: r.attempts,
-          error: r.error,
-          sentAt: r.sentAt,
-        })),
+    const payload = {
+      action: "ackTelegram",
+      results: results.map((r) => ({
+        listingId: r.listingId,
+        success: r.success,
+        messageId: r.messageId,
+        attempts: r.attempts,
+        error: r.error,
+        sentAt: r.sentAt,
+      })),
+    };
+    const response = await executeWithRetry(
+      async () => {
+        const data = (await postToAppsScriptRaw(payload)).value;
+        if (!data.success) {
+          const failure = formatAppsScriptFailure(data);
+          throw new AppsScriptAcknowledgementError(failure.message, failure.code, true);
+        }
+        return data;
       },
-      options,
+      {
+        maxAttempts: env.sheetRetryMaxAttempts,
+        baseDelayMs: env.retryBaseDelayMs,
+        maxDelayMs: env.retryMaxDelayMs,
+        jitterRatio: env.retryJitterRatio,
+      },
+      {
+        operation: "Google Apps Script acknowledgement",
+        shouldRetry: (error) => isRetryableAckFailure(error),
+        onRetry: ({ attempt, maxAttempts, delayMs, error }) =>
+          options.onRetry?.({ attempt, maxAttempts, delayMs, error }),
+      },
     );
+    await options.onComplete?.({
+      attempts: response.attempts,
+      retries: response.retries,
+      totalDelayMs: response.totalDelayMs,
+    });
+    const data = response.value;
 
     const updated: number = typeof data.updatedCount === "number" ? data.updatedCount : 0;
     const notFound: number =
@@ -229,6 +317,7 @@ export async function acknowledgeTelegramResults(
         "[sheets] " + String(notFound) + " acknowledgement target(s) not found in sheet",
       );
     }
+    return { updatedCount: updated, notFoundCount: notFound };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn("[sheets] Telegram acknowledgement failed: " + msg);
@@ -236,5 +325,6 @@ export async function acknowledgeTelegramResults(
       "[sheets] Delivery state not saved — listings may be resent next run (at-least-once delivery)",
     );
     if (options.throwOnError) throw err;
+    return { updatedCount: 0, notFoundCount: 0 };
   }
 }

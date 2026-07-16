@@ -168,8 +168,8 @@ const NUMERIC_FIELD_INDICES = [
   IDX.CONDO_FEES,
 ];
 
-const RECENT_NEW_ROW_HIGHLIGHT_MINUTES = 10;
-const RECENT_NEW_ROW_HIGHLIGHT_FILL = "#E5E7EB";
+const NEW_ROW_HIGHLIGHT_MINUTES = 10;
+const NEW_ROW_HIGHLIGHT_FILL = "#E5E7EB";
 const SHEET_TIMESTAMP_DISPLAY_FORMAT = "yyyy-MM-dd HH:mm";
 
 /**
@@ -180,12 +180,13 @@ function doPost(e) {
   let lockAcquired = false;
 
   try {
-    lock.waitLock(10000);
+    lock.waitLock(30000);
     lockAcquired = true;
   } catch (_) {
     return jsonResponse({
       success: false,
       error: "Could not acquire execution lock",
+      code: "LOCK_TIMEOUT",
     });
   }
 
@@ -201,9 +202,11 @@ function doPost(e) {
 
     return handleSync(payload);
   } catch (error) {
+    const code = error && error.code ? String(error.code) : "INTERNAL_ERROR";
     return jsonResponse({
       success: false,
       error: getErrorMessage(error),
+      code: code,
     });
   } finally {
     if (lockAcquired && lock.hasLock()) {
@@ -259,6 +262,7 @@ function handleAckTelegram(payload) {
     return jsonResponse({
       success: false,
       error: "results array is required",
+      code: "BAD_REQUEST",
     });
   }
 
@@ -311,7 +315,9 @@ function handleAckTelegram(payload) {
 
     if (result.success) {
       normalized[IDX.TELEGRAM_STATUS] = "SENT";
-      normalized[IDX.TELEGRAM_SENT_AT] = result.sentAt || new Date().toISOString();
+      normalized[IDX.TELEGRAM_SENT_AT] = toSheetTimestampValue(
+        result.sentAt || new Date().toISOString(),
+      );
       normalized[IDX.TELEGRAM_MESSAGE_ID] = String(result.messageId ?? "");
       var currentAttempts =
         typeof normalized[IDX.TELEGRAM_ATTEMPTS] === "number"
@@ -340,12 +346,14 @@ function handleAckTelegram(payload) {
   if (updatedCount > 0) {
     writeRows(sheet, data);
     formatSheet(sheet);
+    SpreadsheetApp.flush();
   }
 
   return jsonResponse({
     success: true,
     updatedCount: updatedCount,
     notFoundCount: notFoundCount,
+    reason: notFoundCount > 0 ? "Some listing IDs were not found" : undefined,
   });
 }
 
@@ -845,16 +853,17 @@ function writeRows(sheet, rows) {
 function formatSheet(sheet) {
   sheet.autoResizeColumns(1, FULL_COLS);
   sheet.setFrozenRows(1);
-  applyRecentNewRowHighlightRule(sheet);
 
   const lastRow = sheet.getLastRow();
   const firstSeenColumn = findHeaderColumn(sheet, "First Seen");
   const lastSeenColumn = findHeaderColumn(sheet, "Last Seen");
   const lastCheckedColumn = findHeaderColumn(sheet, "Last Checked");
+  const statusColumn = findHeaderColumn(sheet, "Status");
   const scrapedAtColumn = findHeaderColumn(sheet, "Scraped At");
 
   if (lastRow > 1) {
     migrateIsoTextTimestamps(sheet, [firstSeenColumn, lastSeenColumn, lastCheckedColumn]);
+    applyRecentNewRowBackgrounds(sheet, firstSeenColumn, statusColumn);
 
     sheet
       .getRange(2, IDX.PRICE + 1, lastRow - 1, 7)
@@ -917,41 +926,50 @@ function migrateIsoTextTimestamps(sheet, columns) {
 }
 
 /**
- * Highlights newly inserted rows for a short window after First Seen.
- * The rule is formula-driven so it clears itself automatically.
+ * Highlights only recent NEW rows and clears the highlight once they age out.
+ * Rows outside the current populated range are never touched.
  */
-function applyRecentNewRowHighlightRule(sheet) {
-  const spreadsheet = sheet.getParent();
-  spreadsheet.setRecalculationInterval(
-    SpreadsheetApp.RecalculationInterval.ON_CHANGE_AND_EVERY_MINUTE,
-  );
-
+function applyRecentNewRowBackgrounds(sheet, firstSeenColumn, statusColumn) {
+  const lastRow = sheet.getLastRow();
   const lastColumn = sheet.getLastColumn();
-  const firstSeenColumn = findHeaderColumn(sheet, "First Seen");
-  const statusColumn = findHeaderColumn(sheet, "Status");
-  const formula = buildRecentNewRowHighlightFormula(firstSeenColumn, statusColumn);
-  const dataRange = sheet.getRange(2, 1, Math.max(sheet.getMaxRows() - 1, 1), lastColumn);
-  const rule = SpreadsheetApp.newConditionalFormatRule()
-    .whenFormulaSatisfied(formula)
-    .setBackground(RECENT_NEW_ROW_HIGHLIGHT_FILL)
-    .setRanges([dataRange])
-    .build();
 
-  const existingRules = sheet.getConditionalFormatRules();
-  let replaced = false;
-  const updatedRules = existingRules.map(function (existingRule) {
-    if (isRecentNewRowHighlightRule(existingRule, formula)) {
-      replaced = true;
-      return rule;
-    }
-    return existingRule;
-  });
-
-  if (!replaced) {
-    updatedRules.push(rule);
+  if (lastRow <= 1 || lastColumn <= 0) {
+    return;
   }
 
-  sheet.setConditionalFormatRules(updatedRules);
+  const dataRange = sheet.getRange(2, 1, lastRow - 1, lastColumn);
+  const values = dataRange.getValues();
+  const backgrounds = dataRange.getBackgrounds();
+  const nowMs = new Date().getTime();
+  const maxAgeMs = NEW_ROW_HIGHLIGHT_MINUTES * 60 * 1000;
+  let changed = false;
+
+  for (var rowIndex = 0; rowIndex < values.length; rowIndex++) {
+    const row = values[rowIndex];
+    const status = normalizeText(row[statusColumn - 1]);
+    const firstSeenValue = row[firstSeenColumn - 1];
+    const highlight =
+      status === "NEW" &&
+      firstSeenValue instanceof Date &&
+      !isNaN(firstSeenValue.getTime()) &&
+      nowMs >= firstSeenValue.getTime() &&
+      nowMs - firstSeenValue.getTime() <= maxAgeMs;
+    const rowIsHighlighted = backgrounds[rowIndex].every(function (color) {
+      return color === NEW_ROW_HIGHLIGHT_FILL;
+    });
+
+    if (highlight && !rowIsHighlighted) {
+      backgrounds[rowIndex] = new Array(lastColumn).fill(NEW_ROW_HIGHLIGHT_FILL);
+      changed = true;
+    } else if (!highlight && rowIsHighlighted) {
+      backgrounds[rowIndex] = new Array(lastColumn).fill("#ffffff");
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    dataRange.setBackgrounds(backgrounds);
+  }
 }
 
 function findHeaderColumn(sheet, headerName) {
@@ -964,53 +982,6 @@ function findHeaderColumn(sheet, headerName) {
   }
 
   throw new Error('Missing required header "' + headerName + '"');
-}
-
-function buildRecentNewRowHighlightFormula(firstSeenColumn, statusColumn) {
-  const firstSeenLetter = columnToLetter(firstSeenColumn);
-  const statusLetter = columnToLetter(statusColumn);
-
-  return (
-    '=AND($' +
-    statusLetter +
-    '2="NEW",$' +
-    firstSeenLetter +
-    '2<>"",NOW()>=$' +
-    firstSeenLetter +
-    '2,NOW()-$' +
-    firstSeenLetter +
-    '2<=TIME(0,' +
-    RECENT_NEW_ROW_HIGHLIGHT_MINUTES +
-    ',0))'
-  );
-}
-
-function isRecentNewRowHighlightRule(rule, formula) {
-  const condition = rule.getBooleanCondition();
-
-  if (!condition) {
-    return false;
-  }
-
-  if (condition.getCriteriaType() !== SpreadsheetApp.BooleanCriteria.CUSTOM_FORMULA) {
-    return false;
-  }
-
-  const values = condition.getCriteriaValues();
-  return values && values[0] === formula;
-}
-
-function columnToLetter(column) {
-  let result = "";
-  let current = column;
-
-  while (current > 0) {
-    const remainder = (current - 1) % 26;
-    result = String.fromCharCode(65 + remainder) + result;
-    current = Math.floor((current - 1) / 26);
-  }
-
-  return result;
 }
 
 function getDuplicateIds(rows) {

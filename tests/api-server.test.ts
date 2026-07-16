@@ -79,7 +79,7 @@ function baseConfig(
       newListingsData: [],
     }),
     sendConfiguredFailureAlert: async () => "sent",
-    acknowledgeTelegramResults: async () => undefined,
+    acknowledgeTelegramResults: async () => ({ updatedCount: 1, notFoundCount: 0 }),
     createLogger: () => silentLogger,
     HealthStore: TestHealthStore,
     env: {
@@ -114,7 +114,7 @@ async function withServer(
 
 try {
   await withServer(baseConfig(), async (baseUrl) => {
-    const response = await fetch(baseUrl + "/api/v1/notifications/ack", {
+    const response = await fetch(baseUrl + "/api/v1/notifications/telegram-sent", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ listingId: "12345678" }),
@@ -129,10 +129,11 @@ try {
     baseConfig({
       acknowledgeTelegramResults: async () => {
         invalidAckCalls++;
+        return { updatedCount: 0, notFoundCount: 0 };
       },
     }),
     async (baseUrl) => {
-      const response = await fetch(baseUrl + "/api/v1/notifications/ack", {
+      const response = await fetch(baseUrl + "/api/v1/notifications/telegram-sent", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -157,30 +158,54 @@ try {
       acknowledgeTelegramResults: async (results, options) => {
         ackItems = results;
         ackOptions = options;
+        return { updatedCount: 1, notFoundCount: 0 };
       },
     }),
     async (baseUrl) => {
-      const response = await fetch(baseUrl + "/api/v1/notifications/ack", {
+      const response = await fetch(baseUrl + "/api/v1/notifications/telegram-sent", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "x-workflow-key": "secret-key",
         },
-        body: JSON.stringify({ listingId: "12345678" }),
+        body: JSON.stringify({
+          listingId: "12345678",
+          telegramMessageId: "abc-42",
+        }),
       });
       const body = (await response.json()) as Record<string, unknown>;
       assert(response.status === 200, "ack success: returns 200");
-      assert(body.success === true, "ack success: response success is true");
+      assert(body.ok === true, "ack success: response success is true");
       assert(body.listingId === "12345678", "ack success: response listingId matches");
-      assert(body.status === "acknowledged", "ack success: response status matches");
+      assert(body.telegramStatus === "SENT", "ack success: response status matches");
       assert(ackItems?.length === 1, "ack success: existing ack service is called once");
       assert(ackItems?.[0]?.listingId === "12345678", "ack success: listingId reused");
       assert(ackItems?.[0]?.success === true, "ack success: ack marks notification success");
-      assert(ackItems?.[0]?.messageId === null, "ack success: messageId stays null");
+      assert(ackItems?.[0]?.messageId === "abc-42", "ack success: messageId forwarded");
       assert(ackItems?.[0]?.attempts === 1, "ack success: attempts is 1");
       assert(ackItems?.[0]?.error === null, "ack success: error stays null");
       assert(typeof ackItems?.[0]?.sentAt === "string", "ack success: sentAt is populated");
       assert(ackOptions?.throwOnError === true, "ack success: API opts into throwOnError");
+    },
+  );
+
+  await withServer(
+    baseConfig({
+      acknowledgeTelegramResults: async () => ({ updatedCount: 0, notFoundCount: 1 }),
+    }),
+    async (baseUrl) => {
+      const response = await fetch(baseUrl + "/api/v1/notifications/telegram-sent", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-workflow-key": "secret-key",
+        },
+        body: JSON.stringify({ listingId: "not-found" }),
+      });
+      const body = (await response.json()) as Record<string, unknown>;
+      assert(response.status === 404, "ack not-found: returns 404");
+      assert(body.error === "Listing not found", "ack not-found: safe error returned");
+      assert(body.listingId === "not-found", "ack not-found: listingId echoed");
     },
   );
 
@@ -191,7 +216,7 @@ try {
       },
     }),
     async (baseUrl) => {
-      const response = await fetch(baseUrl + "/api/v1/notifications/ack", {
+      const response = await fetch(baseUrl + "/api/v1/notifications/telegram-sent", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -200,8 +225,11 @@ try {
         body: JSON.stringify({ listingId: "99999999" }),
       });
       const body = (await response.json()) as Record<string, unknown>;
-      assert(response.status === 500, "ack failure: returns non-2xx");
-      assert(body.error === "Acknowledgement failed", "ack failure: error is safe");
+      assert(response.status === 503, "ack failure: returns non-2xx");
+      assert(
+        body.error === "Acknowledgement failed: network down",
+        "ack failure: error reason is surfaced",
+      );
       assert(body.listingId === "99999999", "ack failure: listingId is echoed");
     },
   );

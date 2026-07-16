@@ -18,7 +18,7 @@ export interface ApiServerConfig {
   readonly acknowledgeTelegramResults: (
     results: readonly import("./services/sheets.js").TelegramAckItem[],
     options?: import("./services/sheets.js").TelegramAckOptions,
-  ) => Promise<void>;
+  ) => Promise<import("./services/sheets.js").TelegramAckResult>;
   readonly createLogger: (
     name: string,
     runId?: string,
@@ -78,6 +78,18 @@ function parseListingId(body: Record<string, unknown>): string {
   return listingId.trim();
 }
 
+function parseTelegramMessageId(body: Record<string, unknown>): string | number | null {
+  const messageId = body.telegramMessageId;
+  if (messageId == null) return null;
+  if (typeof messageId === "string") {
+    return messageId.trim().length === 0 ? null : messageId.trim();
+  }
+  if (typeof messageId === "number" && Number.isFinite(messageId)) {
+    return messageId;
+  }
+  throw new Error("telegramMessageId must be a string, number, or omitted");
+}
+
 export async function startApiServer(config: ApiServerConfig): Promise<http.Server> {
   const log = config.createLogger("centris-api");
   const { createServer } = await import("node:http");
@@ -91,8 +103,11 @@ export async function startApiServer(config: ApiServerConfig): Promise<http.Serv
       return;
     }
 
-    if (method === "POST" && parsedUrl.pathname === "/api/v1/notifications/ack") {
-      void handleAckRequest(req, res, config, log);
+    if (
+      method === "POST" &&
+      parsedUrl.pathname === "/api/v1/notifications/telegram-sent"
+    ) {
+      void handleTelegramSentRequest(req, res, config, log);
       return;
     }
 
@@ -210,7 +225,7 @@ async function handleRunRequest(
   }
 }
 
-async function handleAckRequest(
+async function handleTelegramSentRequest(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   config: ApiServerConfig,
@@ -222,9 +237,11 @@ async function handleAckRequest(
   }
 
   let listingId: string;
+  let telegramMessageId: string | number | null;
   try {
     const body = await readJsonBody(req);
     listingId = parseListingId(body);
+    telegramMessageId = parseTelegramMessageId(body);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Invalid request body";
     jsonResponse(res, 400, { error: message });
@@ -232,12 +249,12 @@ async function handleAckRequest(
   }
 
   try {
-    await config.acknowledgeTelegramResults(
+    const ackResult = await config.acknowledgeTelegramResults(
       [
         {
           listingId,
           success: true,
-          messageId: null,
+          messageId: telegramMessageId,
           attempts: 1,
           error: null,
           sentAt: new Date().toISOString(),
@@ -246,14 +263,25 @@ async function handleAckRequest(
       { throwOnError: true },
     );
 
+    if (ackResult.updatedCount === 0 && ackResult.notFoundCount > 0) {
+      jsonResponse(res, 404, {
+        error: "Listing not found",
+        listingId,
+      });
+      return;
+    }
+
     jsonResponse(res, 200, {
-      success: true,
+      ok: true,
       listingId,
-      status: "acknowledged",
+      telegramStatus: "SENT",
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    log.warn("Acknowledgement API failed for listing " + listingId + ": " + message);
-    jsonResponse(res, 500, { error: "Acknowledgement failed", listingId });
+    log.warn("Telegram-sent API failed for listing " + listingId + ": " + message);
+    jsonResponse(res, 503, {
+      error: "Acknowledgement failed: " + message,
+      listingId,
+    });
   }
 }

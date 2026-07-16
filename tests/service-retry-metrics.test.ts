@@ -97,6 +97,7 @@ function restoreFetch(): void {
 }
 
 const { syncDetailsToSheet } = await import("../src/services/sheets.js");
+const { acknowledgeTelegramResults } = await import("../src/services/sheets.js");
 const { notifyNewListings } = await import("../src/services/telegram.js");
 
 try {
@@ -189,6 +190,55 @@ try {
   assert(secondRow?.[16] === 0, "numeric zero municipal tax stays 0");
   assert(secondRow?.[17] === 0, "numeric zero school tax stays 0");
   assert(secondRow?.[18] === 0, "numeric zero condo fees stays 0");
+
+  let ackCall = 0;
+  const ackRetryDelays: number[] = [];
+  mockFetch(() => {
+    ackCall++;
+    if (ackCall < 3) {
+      return response(200, {
+        success: false,
+        error: "Could not acquire execution lock",
+        code: "LOCK_TIMEOUT",
+      });
+    }
+    return response(200, { success: true, updatedCount: 1, notFoundCount: 0 });
+  });
+  const ackResult = await acknowledgeTelegramResults([
+    {
+      listingId: "ack-1",
+      success: true,
+      messageId: "m-1",
+      attempts: 1,
+      error: null,
+      sentAt: "2026-07-15T00:00:00.000Z",
+    },
+  ], {
+    onRetry: ({ delayMs }) => ackRetryDelays.push(delayMs),
+  });
+  assert(ackCall === 3, "ack retries transient success=false until success");
+  assert(ackRetryDelays.join(",") === "100,200", "ack retry delays use bounded backoff");
+  assert(ackResult.updatedCount === 1, "ack retry returns updated count after success");
+  assert(ackResult.notFoundCount === 0, "ack retry returns notFound count after success");
+
+  let ackNotFoundCalls = 0;
+  mockFetch(() => {
+    ackNotFoundCalls++;
+    return response(200, { success: true, updatedCount: 0, notFoundCount: 1 });
+  });
+  const ackNotFoundResult = await acknowledgeTelegramResults([
+    {
+      listingId: "missing",
+      success: true,
+      messageId: null,
+      attempts: 1,
+      error: null,
+      sentAt: "2026-07-15T00:00:00.000Z",
+    },
+  ]);
+  assert(ackNotFoundCalls === 1, "ack not-found does not retry");
+  assert(ackNotFoundResult.updatedCount === 0, "ack not-found keeps updated count 0");
+  assert(ackNotFoundResult.notFoundCount === 1, "ack not-found returns count 1");
 
   let telegramCall = 0;
   const telegramRetryDelays: number[] = [];
